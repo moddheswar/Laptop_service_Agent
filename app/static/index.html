@@ -1,0 +1,132 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<title>NovaSupport</title>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<style>
+  :root { --bg:#0f1115; --panel:#171a21; --line:#262b36; --txt:#e6e9ef; --mut:#8b93a3; --acc:#4f8cff; }
+  * { box-sizing:border-box; }
+  body { margin:0; font:14px/1.5 system-ui,sans-serif; background:var(--bg); color:var(--txt); height:100vh; display:flex; }
+  .col { display:flex; flex-direction:column; height:100vh; }
+  #chat { flex:1; border-right:1px solid var(--line); }
+  #side { width:320px; background:var(--panel); }
+  header { padding:12px 16px; border-bottom:1px solid var(--line); display:flex; gap:8px; align-items:center; }
+  header h1 { font-size:15px; margin:0; flex:1; }
+  input,button { font:inherit; }
+  input[type=text],input[type=email] { background:#0b0d12; border:1px solid var(--line); color:var(--txt); border-radius:8px; padding:8px 10px; }
+  button { background:var(--acc); color:#fff; border:0; border-radius:8px; padding:8px 12px; cursor:pointer; }
+  button.ghost { background:#222837; }
+  button.danger { background:#c0392b; }
+  #msgs { flex:1; overflow-y:auto; padding:16px; display:flex; flex-direction:column; gap:10px; }
+  .m { max-width:75%; padding:10px 12px; border-radius:12px; white-space:pre-wrap; }
+  .m.user { align-self:flex-end; background:var(--acc); color:#fff; border-bottom-right-radius:4px; }
+  .m.bot { align-self:flex-start; background:var(--panel); border:1px solid var(--line); border-bottom-left-radius:4px; }
+  #composer { display:flex; gap:8px; padding:12px 16px; border-top:1px solid var(--line); }
+  #composer input { flex:1; }
+  #approvals { flex:1; overflow-y:auto; padding:12px; display:flex; flex-direction:column; gap:10px; }
+  .card { background:#0b0d12; border:1px solid var(--line); border-radius:10px; padding:10px; }
+  .card .meta { color:var(--mut); font-size:12px; margin-bottom:6px; }
+  .card .row { display:flex; gap:8px; margin-top:8px; }
+  .card .row button { flex:1; }
+  #banner { padding:6px 16px; background:#3a2b00; color:#ffd479; font-size:12px; display:none; }
+</style>
+</head>
+<body>
+  <div class="col" id="chat">
+    <header>
+      <h1>NovaSupport</h1>
+      <input type="email" id="email" value="ana@example.com" style="width:200px"/>
+      <button class="ghost" id="new">New chat</button>
+    </header>
+    <div id="banner">Refund waiting for manager approval</div>
+    <div id="msgs"></div>
+    <div id="composer">
+      <input type="text" id="inp" placeholder="Ask about orders, refunds, tickets, tech issues…" autocomplete="off"/>
+      <button id="send">Send</button>
+    </div>
+  </div>
+
+  <div class="col" id="side">
+    <header><h1>Pending approvals</h1></header>
+    <div id="approvals"></div>
+  </div>
+
+<script>
+let cid = null;
+const $ = id => document.getElementById(id);
+const msgs = $("msgs");
+
+function add(role, text) {
+  const d = document.createElement("div");
+  d.className = "m " + (role === "user" ? "user" : "bot");
+  d.textContent = text;
+  msgs.appendChild(d);
+  msgs.scrollTop = msgs.scrollHeight;
+}
+
+async function send() {
+  const text = $("inp").value.trim();
+  if (!text) return;
+  $("inp").value = "";
+  add("user", text);
+  $("send").disabled = true;
+  try {
+    const r = await fetch("/api/chat", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({email: $("email").value.trim(), message: text, conversation_id: cid}),
+    });
+    if (!r.ok) { add("bot", "Error: " + (await r.json()).detail); return; }
+    const data = await r.json();
+    cid = data.conversation_id;
+    add("bot", data.reply);
+    $("banner").style.display = data.approval_id ? "block" : "none";
+  } finally { $("send").disabled = false; $("inp").focus(); }
+}
+
+async function loadApprovals() {
+  const r = await fetch("/api/approvals/pending");
+  const {approvals} = await r.json();
+  const box = $("approvals");
+  box.innerHTML = "";
+  for (const a of approvals) {
+    const payload = JSON.parse(a.payload_json);
+    const card = document.createElement("div");
+    card.className = "card";
+    card.innerHTML = `<div class="meta">#${a.id} · ${a.kind} · conv ${a.conversation_id}</div>
+      <div>Refund of $${(payload.amount_cents/100).toFixed(2)} — ${payload.reason || "no reason"}</div>`;
+    const row = document.createElement("div");
+    row.className = "row";
+    const yes = document.createElement("button");
+    yes.textContent = "Approve";
+    yes.onclick = () => decide(a.id, true);
+    const no = document.createElement("button");
+    no.textContent = "Reject";
+    no.className = "danger";
+    no.onclick = () => decide(a.id, false);
+    row.append(yes, no);
+    card.appendChild(row);
+    box.appendChild(card);
+  }
+  if (!approvals.length) box.innerHTML = '<div class="card meta">Nothing pending.</div>';
+}
+
+async function decide(id, approved) {
+  await fetch(`/api/approvals/${id}/decide`, {
+    method: "POST",
+    headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({approved}),
+  });
+  $("banner").style.display = "none";
+  loadApprovals();
+}
+
+$("send").onclick = send;
+$("inp").onkeydown = e => { if (e.key === "Enter") send(); };
+$("new").onclick = () => { cid = null; msgs.innerHTML = ""; $("banner").style.display = "none"; };
+setInterval(loadApprovals, 4000);
+loadApprovals();
+</script>
+</body>
+</html>
