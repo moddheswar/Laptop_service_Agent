@@ -1,3 +1,4 @@
+import base64
 import json
 import uuid
 from dataclasses import dataclass, field
@@ -34,7 +35,11 @@ class GeminiProvider:
             elif m["role"] == "assistant":
                 parts = []
                 for tc in m.get("tool_calls", []):
-                    parts.append(types.Part(function_call=types.FunctionCall(name=tc["name"], args=tc["args"])))
+                    signature = tc.get("thought_signature")
+                    parts.append(types.Part(
+                        function_call=types.FunctionCall(name=tc["name"], args=tc["args"]),
+                        thought_signature=base64.b64decode(signature) if signature else None,
+                    ))
                 if m.get("content"):
                     parts.append(types.Part(text=m["content"]))
                 if parts:
@@ -69,10 +74,17 @@ class GeminiProvider:
                 temperature=0,
             ),
         )
-        calls = [
-            {"id": f"call_{uuid.uuid4().hex[:12]}", "name": fc.name, "args": dict(fc.args or {})}
-            for fc in (resp.function_calls or [])
-        ]
+        calls = []
+        for part in (resp.candidates[0].content.parts if resp.candidates else []):
+            if part.function_call:
+                call = {
+                    "id": f"call_{uuid.uuid4().hex[:12]}",
+                    "name": part.function_call.name,
+                    "args": dict(part.function_call.args or {}),
+                }
+                if part.thought_signature:
+                    call["thought_signature"] = base64.b64encode(part.thought_signature).decode("ascii")
+                calls.append(call)
         return ModelResponse(content=resp.text or None, tool_calls=calls)
 
 def get_provider():

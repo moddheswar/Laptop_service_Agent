@@ -4,7 +4,7 @@ import pytest
 from app.agent import run_turn
 from app.providers import ModelResponse
 from app.runner import setup
-from app.support_db import decide_approval
+from app.support_db import decide_approval, history_for_llm
 
 @pytest.fixture()
 def conn(tmp_path):
@@ -59,3 +59,16 @@ def test_same_tool_call_id_never_executes_twice(conn):
     ])
     run_turn(conn, "ana@example.com", "check twice", p)
     assert conn.execute("SELECT COUNT(*) c FROM tool_runs").fetchone()["c"] == 1
+
+def test_gemini_tool_call_signature_survives_history_round_trip(conn):
+    p = SequenceProvider([
+        ModelResponse(tool_calls=[{
+            "id": "c1", "name": "check_refund_eligibility",
+            "args": {"order_no": "ORD-1001"}, "thought_signature": "c2lnbmF0dXJl",
+        }]),
+        ModelResponse(content="done"),
+    ])
+    _, conversation_id = run_turn(conn, "ana@example.com", "check ORD-1001", p)
+    history = history_for_llm(conn, conversation_id)
+    assistant = next(item for item in history if item["role"] == "assistant")
+    assert assistant["tool_calls"][0]["thought_signature"] == "c2lnbmF0dXJl"

@@ -65,7 +65,7 @@ CREATE TABLE IF NOT EXISTS messages (
   role TEXT NOT NULL CHECK (role IN ('user','assistant','tool','system')),
   content TEXT NOT NULL DEFAULT '',
   tool_call_id TEXT,
-  tool_name TEXT,             -- NEW: function name for role='tool'
+  tool_name TEXT,
   tool_calls_json TEXT,
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );

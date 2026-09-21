@@ -40,39 +40,44 @@ def conversation_variant(conn, conversation_id):
         "SELECT variant FROM conversations WHERE id=?", (conversation_id,)
     ).fetchone()["variant"]
 
-def add_message(conn, conversation_id, role, content="", tool_call_id=None, tool_calls_json=None):
+def add_message(conn, conversation_id, role, content="", tool_call_id=None,
+                tool_name=None, tool_calls_json=None):
     conn.execute(
         """
-        INSERT INTO messages(conversation_id, role, content, tool_call_id, tool_calls_json)
-        VALUES (?,?,?,?,?)
+        INSERT INTO messages(conversation_id, role, content, tool_call_id, tool_name, tool_calls_json)
+        VALUES (?,?,?,?,?,?)
         """,
-        (conversation_id, role, content, tool_call_id, tool_calls_json),
+        (conversation_id, role, content, tool_call_id, tool_name, tool_calls_json),
     )
     conn.commit()
-    return conn.execute("SELECT last_insert_rowid() id").fetchone()["id"]
 
-def history_for_llm(conn, conversation_id, system_prompt, limit=40):
-    """Rebuild exact OpenAI message format from the DB, including tool calls."""
+def history_for_llm(conn, conversation_id, limit=40):
+    """
+    Provider-agnostic history from the DB.
+    Items: {role, content}
+    assistant items may add: tool_calls=[{id,name,args}]
+    tool items add: tool_call_id, tool_name
+    """
     rows = conn.execute(
         "SELECT * FROM messages WHERE conversation_id=? ORDER BY id DESC LIMIT ?",
         (conversation_id, limit),
     ).fetchall()
-    out = [{"role": "system", "content": system_prompt}]
+    out = []
     for r in reversed(rows):
-        if r["role"] == "assistant" and r["tool_calls_json"]:
-            out.append({
-                "role": "assistant",
-                "content": r["content"] or None,
-                "tool_calls": json.loads(r["tool_calls_json"]),
-            })
-        elif r["role"] == "tool":
-            out.append({
-                "role": "tool",
-                "tool_call_id": r["tool_call_id"],
-                "content": r["content"],
-            })
-        else:
-            out.append({"role": r["role"], "content": r["content"]})
+        item = {"role": r["role"], "content": r["content"]}
+        if r["tool_calls_json"]:
+            tcs = json.loads(r["tool_calls_json"])
+            item["tool_calls"] = [
+                {"id": t["id"], "name": t["function"]["name"],
+                 "args": json.loads(t["function"]["arguments"] or "{}"),
+                 **({"thought_signature": t["thought_signature"]}
+                    if t.get("thought_signature") else {})}
+                for t in tcs
+            ]
+        if r["role"] == "tool":
+            item["tool_call_id"] = r["tool_call_id"]
+            item["tool_name"] = r["tool_name"]
+        out.append(item)
     return out
 
 def recent_messages(conn, conversation_id, limit=20):

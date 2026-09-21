@@ -4,6 +4,7 @@ import random
 from . import config, idempotency
 from .domain import Decision
 from .memory import Memory
+from .prompts import build_system_prompt
 from .support_db import (
     add_message, create_approval, create_conversation, get_customer_by_email,
     get_order_for_customer, history_for_llm, record_event,
@@ -11,17 +12,21 @@ from .support_db import (
 from .tools.support import SPECS, TOOLS
 from .verdict import judge
 
+
 def _execute_tool_call(conn, customer, conversation_id, call):
-    """Runs ONE tool call behind verdict + idempotency. Returns the dict fed back to the LLM."""
+    """Runs ONE tool call behind verdict + idempotency. Returns (output_dict, status)."""
     name, args = call["name"], call.get("args", {})
-    key = idempotency.make_key(conversation_id, call["id"])  # tool_call id = natural idempotency key
+    key = idempotency.make_key(conversation_id, call["id"])
     run_id, fresh = idempotency.begin_tool_run(conn, key, conversation_id, name, args)
 
     if not fresh:  # replay — return stored result, never re-execute side effects
-        row = conn.execute("SELECT output_json, status FROM tool_runs WHERE id=?", (run_id,)).fetchone()
+        row = conn.execute(
+            "SELECT output_json, status FROM tool_runs WHERE id=?", (run_id,)
+        ).fetchone()
         return json.loads(row["output_json"] or "{}"), row["status"]
 
-    record_event(conn, f"conversation:{conversation_id}", "tool_started", {"name": name, "args": args})
+    record_event(conn, f"conversation:{conversation_id}", "tool_started",
+                 {"name": name, "args": args})
     verdict = judge(conn, customer, name, args)
 
     if verdict.decision == Decision.DENY:
@@ -38,11 +43,13 @@ def _execute_tool_call(conn, customer, conversation_id, call):
         output = {"ok": True, "status": "pending_approval", "approval_id": approval_id,
                   "message": verdict.reason}
         idempotency.finish_tool_run(conn, run_id, "waiting_approval", output)
-        conn.execute("UPDATE conversations SET status='waiting_approval' WHERE id=?", (conversation_id,))
+        conn.execute(
+            "UPDATE conversations SET status='waiting_approval' WHERE id=?", (conversation_id,))
         conn.commit()
         return output, "waiting_approval"
 
-    ctx = {"conn": conn, "customer": customer, "conversation_id": conversation_id, "tool_run_id": run_id}
+    ctx = {"conn": conn, "customer": customer,
+           "conversation_id": conversation_id, "tool_run_id": run_id}
     try:
         output = {"ok": True, **TOOLS[name](ctx, **args)}
         idempotency.finish_tool_run(conn, run_id, "done", output)
@@ -53,7 +60,8 @@ def _execute_tool_call(conn, customer, conversation_id, call):
         idempotency.finish_tool_run(conn, run_id, "failed", output)
         return output, "failed"
 
-def run_turn(conn, email, user_text, provider, conversation_id=None, system_prompt=""):
+
+def run_turn(conn, email, user_text, provider, conversation_id=None):
     customer = get_customer_by_email(conn, email)
     if customer is None:
         raise ValueError(f"Unknown customer: {email}")
@@ -67,9 +75,12 @@ def run_turn(conn, email, user_text, provider, conversation_id=None, system_prom
     memory = Memory.load(conn, conversation_id)
     memory.notice(conn, conversation_id, user_text)
 
-    # ---- real multi-round agent loop ----
+    # Built HERE, after memory extraction, so fresh facts are included.
+    # No caller can forget it, and no empty string can reach the model.
+    system_prompt = build_system_prompt(conn, conversation_id)
+
     for _ in range(config.MAX_TOOL_ROUNDS):
-        hist = history_for_llm(conn, conversation_id, system_prompt)
+        hist = history_for_llm(conn, conversation_id)              # user/assistant/tool only
         resp = provider.respond(hist, system_prompt, SPECS)
 
         if not resp.tool_calls:
@@ -79,7 +90,9 @@ def run_turn(conn, email, user_text, provider, conversation_id=None, system_prom
 
         tool_calls_db = [
             {"id": c["id"], "type": "function",
-             "function": {"name": c["name"], "arguments": json.dumps(c["args"])}}
+             "function": {"name": c["name"], "arguments": json.dumps(c["args"])},
+             **({"thought_signature": c["thought_signature"]}
+                if c.get("thought_signature") else {})}
             for c in resp.tool_calls
         ]
         add_message(conn, conversation_id, "assistant", resp.content or "",
@@ -88,7 +101,7 @@ def run_turn(conn, email, user_text, provider, conversation_id=None, system_prom
         for call in resp.tool_calls:
             output, status = _execute_tool_call(conn, customer, conversation_id, call)
             add_message(conn, conversation_id, "tool", json.dumps(output),
-                        tool_call_id=call["id"], tool_calls_json=json.dumps([call]))
+                        tool_call_id=call["id"], tool_name=call["name"])
 
     final = "This needs a human agent — I'm escalating your conversation."
     add_message(conn, conversation_id, "assistant", final)
