@@ -1,0 +1,1 @@
+SUPABASE_URL=https://ciygviforuwwspigeajp.supabase.co
